@@ -18,9 +18,11 @@ static bool match_pdp_packet(const void *pdata, uint16_t packet_len, const struc
 {
     struct gtp_hdr *h = (struct gtp_hdr*)pdata;
     uint32_t offs = sizeof(*h);
+    uint64_t msisdn = 0;
+    uint64_t imsi = 0;
     uint8_t header_type;
     uint16_t len;
-    bool whitelisted = false;
+    bool matched = false;
 
     /* Match only known types of PDP packets */
     if (h->flags != 0x32)
@@ -33,22 +35,27 @@ static bool match_pdp_packet(const void *pdata, uint16_t packet_len, const struc
     if (h->next_ext != 0x00)
 	return false;
 
-    if (info->type == PDP_ANY)
-	return true;
 
-    while((offs + 2 < packet_len) && (offs + 2 < (sizeof(*h) + ntohs(h->len))) && !whitelisted) {
+    while((offs + 2 < packet_len) && (offs + 2 < (sizeof(*h) + ntohs(h->len))) && !matched) {
 	header_type = *(uint8_t *)(pdata + offs);
 	len = 0;
 	if (header_type >= 0b10000000) { // | type | length | value |
 	    len = htons(*(uint16_t *)(pdata + offs + 1)) + 2; // +2 for length bytes
 	    if (header_type == GTP_EXT_MSISDN) {
-		//  printk(KERN_INFO "msisdn: %llu", msisdn_to_uint64(pdata + offs + 3, len - 2 ));
-		whitelisted = pdp_stationid_match(msisdn_to_uint64(pdata + offs + 3, len - 2), info);
-		return whitelisted;
+	        msisdn = msisdn_to_uint64(pdata + offs + 3, len - 2 );
+		if (info->type == PDP_ANY) {
+		    matched = true;
+		}
+		else {
+		    matched = pdp_stationid_match(msisdn, info);
+		}
 	    }
 	}
 	else { // | type | value |
-	    int i = 0;
+            int i = 0;
+	    if (header_type == GTP_EXT_IMSI) {
+		    imsi = imsi_to_uint64(pdata + offs + 1);
+	    }
 	    for(; i < gtp_headers_size(); ++i) {
 		if (gtp_headers[i].type == header_type) {
 		    len = gtp_headers[i].length;
@@ -58,13 +65,24 @@ static bool match_pdp_packet(const void *pdata, uint16_t packet_len, const struc
 	}
 
 	if (len <= 0)
-	    return false;
+	    break;
 
 	offs += len + 1; // +1 for header type
 
     }
+    if (matched) {
+        char * msg;
+        switch (info->type) {
+	    case PDP_ANY        : msg = "any      "; break;
+	    case PDP_RESERVED   : msg = "reserved "; break;
+	    case PDP_STATION_ID : msg = "matched  "; break;
+	}
 
-    return whitelisted;
+        printk(KERN_INFO "%s msisdn: %llu imsi: %llu", msg, msisdn, imsi) ;
+
+    }
+
+    return matched;
 }
 
 

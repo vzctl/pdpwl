@@ -15,6 +15,7 @@ struct gtp_hdr {
 
 extern bool pdp_stationid_match(uint64_t stationid, const struct xt_pdp_mtinfo *info);
 extern uint64_t msisdn_to_uint64(const uint8_t * ad, uint8_t len);
+extern uint64_t imsi_to_uint64(const uint8_t * ad);
 
 struct header_len{
     uint8_t type;
