@@ -16,69 +16,60 @@
 /* return true if packet is matched. pdata - start of GTP header */
 static bool match_pdp_packet(const void *pdata, uint16_t packet_len, const struct xt_pdp_mtinfo *info)
 {
-    struct gtp_hdr *h = (struct gtp_hdr*)pdata;
-    uint32_t offs = sizeof(*h);
+    uint32_t offs = sizeof(struct gtp_hdr);
     uint64_t msisdn = 0;
     uint64_t imsi = 0;
     uint8_t header_type;
     uint16_t len;
     bool matched = false;
 
-    /* Match only known types of PDP packets */
-    if (h->flags != 0x32)
-	return false;
+    while((offs + 2 < packet_len) && !matched) {
+      header_type = *(uint8_t *)(pdata + offs);
+      len = 0;
+      if (header_type >= 0b10000000) { // | type | length | value |
+          len = htons(*(uint16_t *)(pdata + offs + 1)) + 2; // +2 for length bytes
+          if (header_type == GTP_EXT_MSISDN) {
+              msisdn = msisdn_to_uint64(pdata + offs + 3, len - 2 );
+              if (info->type == PDP_ANY) {
+                  matched = true;
+              }
+              else {
+                  matched = pdp_stationid_match(msisdn, info);
+              }
+          }
+      }
+      else { // | type | value |
+          int i = 0;
 
-    if (h->message_type != PDP_CREATE_CONTEXT_REQ)
-	return false;
+          if (header_type == GTP_EXT_IMSI) {
+              imsi = imsi_to_uint64(pdata + offs + 1);
+          }
 
-    /* check for "no more extension headers" */
-    if (h->next_ext != 0x00)
-	return false;
+          for(; i < gtp_headers_size(); ++i) {
+              if (gtp_headers[i].type == header_type) {
+                  len = gtp_headers[i].length;
+                  break;
+              }
+          }
+      }
 
+      if (len <= 0)
+          break;
 
-    while((offs + 2 < packet_len) && (offs + 2 < (sizeof(*h) + ntohs(h->len))) && !matched) {
-	header_type = *(uint8_t *)(pdata + offs);
-	len = 0;
-	if (header_type >= 0b10000000) { // | type | length | value |
-	    len = htons(*(uint16_t *)(pdata + offs + 1)) + 2; // +2 for length bytes
-	    if (header_type == GTP_EXT_MSISDN) {
-	        msisdn = msisdn_to_uint64(pdata + offs + 3, len - 2 );
-		if (info->type == PDP_ANY) {
-		    matched = true;
-		}
-		else {
-		    matched = pdp_stationid_match(msisdn, info);
-		}
-	    }
-	}
-	else { // | type | value |
-            int i = 0;
-	    if (header_type == GTP_EXT_IMSI) {
-		    imsi = imsi_to_uint64(pdata + offs + 1);
-	    }
-	    for(; i < gtp_headers_size(); ++i) {
-		if (gtp_headers[i].type == header_type) {
-		    len = gtp_headers[i].length;
-		    break;
-		}
-	    }
-	}
-
-	if (len <= 0)
-	    break;
-
-	offs += len + 1; // +1 for header type
+      offs += len + 1; // +1 for header type
 
     }
+
     if (matched) {
         char * msg;
         switch (info->type) {
-	    case PDP_ANY        : msg = "any      "; break;
-	    case PDP_RESERVED   : msg = "reserved "; break;
-	    case PDP_STATION_ID : msg = "matched  "; break;
-	}
+            case PDP_ANY        : msg = "any      "; break;
+            case PDP_RESERVED   : msg = "reserved "; break;
+            case PDP_STATION_ID : msg = "matched  "; break;
+            default             : msg = "error";
+        }
 
-        printk(KERN_INFO "%s msisdn: %llu imsi: %llu", msg, msisdn, imsi) ;
+        printk(KERN_INFO "%s msisdn: %llu imsi: %llu\n", msg, msisdn, imsi) ;
 
     }
 
@@ -90,16 +81,31 @@ static bool pdp_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
     const struct iphdr *iph = ip_hdr(skb);
     const struct udphdr *udph;
-    uint16_t len;
+    const struct gtp_hdr *gtph;
+    uint16_t payload_len;
+    bool matched = false;
+    void * payload;
 
     if (iph->protocol != IPPROTO_UDP) return false;
 
     udph = (const void *)iph + ip_hdrlen(skb);
     if (udph->dest != 0x4b08) return false; // match only GTP Control port 2123
 
-    len  = ntohs(udph->len) - sizeof(struct udphdr);
+    gtph = (const void *)udph + sizeof(struct udphdr);
+    if (gtph->flags != 0x32) return false; // Match only known types of PDP packets
+    if (gtph->message_type != PDP_CREATE_CONTEXT_REQ) return false; // check for "no more extension headers"
+    if (gtph->next_ext != 0x00) return false;
 
-    return match_pdp_packet((void *)udph + sizeof(struct udphdr), len, par->matchinfo);
+    payload_len = ntohs(udph->len) - sizeof(struct udphdr);
+    payload = kmalloc(payload_len, GFP_KERNEL);
+    if (skb_copy_bits(skb, sizeof(struct iphdr) + sizeof(struct udphdr), payload, payload_len) == 0){
+        matched = match_pdp_packet(payload, payload_len, par->matchinfo);
+    } else {
+        printk(KERN_INFO "failed to copy payload") ;
+    }
+    kfree(payload);
+
+    return matched;
 }
 
 static int pdp_mt_check(const struct xt_mtchk_param *par)
@@ -109,12 +115,12 @@ static int pdp_mt_check(const struct xt_mtchk_param *par)
 
 static struct xt_match pdp_mt_reg[] __read_mostly = {
     {
-	.name       = "pdp",
-	.revision   = 0,
-	.match      = pdp_mt,
-	.checkentry = pdp_mt_check,
-	.matchsize  = XT_ALIGN(sizeof(struct xt_pdp_mtinfo)),
-	.me         = THIS_MODULE,
+        .name       = "pdp",
+        .revision   = 0,
+        .match      = pdp_mt,
+        .checkentry = pdp_mt_check,
+        .matchsize  = XT_ALIGN(sizeof(struct xt_pdp_mtinfo)),
+        .me         = THIS_MODULE,
     },
 };
 
