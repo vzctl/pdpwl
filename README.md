@@ -1,6 +1,6 @@
 # PDP Create Context iptables matcher
 
-This is an iptables module and it can match Caller-Station-Id attribute from PDP Create Context request. It also implements whitelisting by Station-Id ranges. This is open source and released under the terms of the GNU General Public License v2
+This is an iptables module and it can match Caller-Station-Id attribute from PDP Create Context request. It also implements whitelisting by Station-Id ranges.
 
 ## Usage
 
